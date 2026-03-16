@@ -1,0 +1,83 @@
+name: Build & Release FastSearchAddIn
+
+on:
+  push:
+    branches:
+      - "claude/outlook-vsto-search-export-lo7zQ"
+  workflow_dispatch:   # allow manual trigger from GitHub UI
+
+jobs:
+  build:
+    runs-on: windows-latest   # VSTO + .NET Framework requires Windows
+
+    steps:
+      # ── 1. Checkout ────────────────────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ── 2. Setup MSBuild ───────────────────────────────────────────────────
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      # ── 3. Setup NuGet ─────────────────────────────────────────────────────
+      - name: Setup NuGet
+        uses: NuGet/setup-nuget@v2
+        with:
+          nuget-version: latest
+
+      # ── 4. Restore NuGet packages ──────────────────────────────────────────
+      - name: Restore NuGet packages
+        run: nuget restore FastSearchAddIn/FastSearchAddIn.csproj
+
+      # ── 5. Build Release ───────────────────────────────────────────────────
+      - name: Build (Release)
+        run: |
+          msbuild FastSearchAddIn/FastSearchAddIn.csproj `
+            /p:Configuration=Release `
+            /p:Platform="Any CPU" `
+            /p:SignManifests=false `
+            /v:minimal
+
+      # ── 6. Collect output files ────────────────────────────────────────────
+      - name: Collect build output
+        run: |
+          New-Item -ItemType Directory -Force -Path publish
+          Copy-Item -Path "FastSearchAddIn/bin/Release/*" -Destination publish/ -Recurse
+        shell: pwsh
+
+      # ── 7. Upload artifact ─────────────────────────────────────────────────
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: FastSearchAddIn-Release
+          path: publish/
+          retention-days: 30
+
+      # ── 8. Create GitHub Release (only on push to the feature branch) ──────
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: "build-${{ github.run_number }}"
+          name: "FastSearchAddIn Build ${{ github.run_number }}"
+          body: |
+            ## FastSearchAddIn – Outlook VSTO Add-in
+
+            ### Installation
+            1. Download and extract `FastSearchAddIn-Release.zip`
+            2. Double-click `FastSearchAddIn.vsto` to install
+            3. When prompted, click **Install** and trust the certificate
+            4. Open Outlook – the **Fast Search** task pane will appear on the right
+
+            ### Requirements
+            - Windows 10/11
+            - Outlook 2016, 2019, or Microsoft 365 (desktop)
+            - [.NET Framework 4.7.2 Runtime](https://dotnet.microsoft.com/download/dotnet-framework/net472) (already included on most Windows 10/11 machines)
+            - [Visual Studio 2010 Tools for Office Runtime](https://aka.ms/vstoruntime) (download if Outlook shows an error)
+
+            ### Uninstall
+            Control Panel → Programs → FastSearchAddIn → Uninstall
+          files: publish/**
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
