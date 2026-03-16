@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  RemitSaver Ribbon UI definition.
+  This file is the canonical source of the Ribbon XML.
+  The Python add-in returns this content inline from GetCustomUI() so that
+  Outlook loads it without needing to read the file at runtime.
+  Keeping this file lets you edit and diff the XML separately.
+-->
+<customUI xmlns="http://schemas.microsoft.com/office/2009/07/customui"
+          onLoad="ribbon_on_load">
+  <ribbon>
+    <tabs>
+      <tab id="tabRemitSaver" label="RemitSaver">
+
+        <group id="grpMain" label="Remittance">
+
+          <button id="btnExtractNow"
+                  label="Extract Now"
+                  imageMso="ImportExportDataAccess"
+                  size="large"
+                  onAction="on_extract_now"
+                  screentip="Run remittance extraction for selected payers"
+                  supertip="Scans configured Outlook folders, finds matching emails, and saves attachments renamed to AMOUNT COMPANY.ext"/>
+
+          <button id="btnManagePayers"
+                  label="Manage Payers"
+                  imageMso="TableInsert"
+                  size="large"
+                  onAction="on_manage_payers"
+                  screentip="Add, edit or remove payer configurations"
+                  supertip="Open the payer management dialog to configure sender filters, Outlook watch folders, local save paths, and extraction settings"/>
+
+          <button id="btnSettings"
+                  label="Settings"
+                  imageMso="OptionsCustomizeKeyboard"
+                  size="large"
+                  onAction="on_settings"
+                  screentip="Open global RemitSaver settings"
+                  supertip="Configure default save path, log file location, inline-attachment handling, and startup options"/>
+
+        </group>
+
+      </tab>
+    </tabs>
+  </ribbon>
+</customUI>
