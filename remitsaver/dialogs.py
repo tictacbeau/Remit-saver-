@@ -16,12 +16,21 @@ logger = logging.getLogger("RemitSaver.dialogs")
 
 # ── Utility: pick a local folder via Windows FolderBrowserDialog ──────────────
 
-def _pick_folder(title: str = "Select Folder", initial: str = "") -> str:
-    """Open a native folder-picker; return selected path or ''."""
-    root = tk.Tk()
-    root.withdraw()
-    path = filedialog.askdirectory(title=title, initialdir=initial or os.path.expanduser("~"))
-    root.destroy()
+def _pick_folder(title: str = "Select Folder", initial: str = "",
+                 parent: tk.Misc | None = None) -> str:
+    """Open a native folder-picker; return selected path or ''.
+
+    BUG FIX #11: The old implementation created a new tk.Tk() root every
+    time it was called.  Creating a second Tk root while other tkinter
+    windows are already open corrupts the widget hierarchy and can cause
+    blank dialogs or crashes.  Pass the caller's window as *parent* instead
+    so the dialog is correctly anchored to the existing Tk instance.
+    """
+    path = filedialog.askdirectory(
+        title=title,
+        initialdir=initial or os.path.expanduser("~"),
+        parent=parent,
+    )
     return path or ""
 
 
@@ -163,42 +172,49 @@ class ExtractNowDialog:
         t.start()
 
     def _run_extraction(self, selected: List[str]) -> None:
-        from config import load_payers, load_settings
-        from extractor import run_extraction_for_payer
-
-        payers   = {p["name"]: p for p in load_payers()}
-        settings = load_settings()
-        total_saved = total_skipped = total_errors = 0
-
-        for name in selected:
-            payer = payers.get(name)
-            if not payer:
-                continue
-            res = run_extraction_for_payer(
-                payer,
-                self._app,
-                settings,
-                unread_only=self._unread_only.get(),
-                progress_cb=self._append_log,
-            )
-            total_saved   += res.saved
-            total_skipped += res.skipped
-            total_errors  += res.errors
-
-        summary = (
-            f"Complete — Saved: {total_saved}, "
-            f"Skipped: {total_skipped}, Errors: {total_errors}"
-        )
-        self._append_log(summary)
-
-        def _done():
-            self._progress.stop()
-            self._run_btn.configure(state="normal")
-            self._summary.configure(text=summary)
+        # BUG FIX #4 (dialog side): initialise COM for this background thread
+        # before touching any Outlook COM objects via self._app.
+        import pythoncom
+        pythoncom.CoInitialize()
         try:
-            self._win.after(0, _done)
-        except Exception:
-            pass
+            from config import load_payers, load_settings
+            from extractor import run_extraction_for_payer
+
+            payers   = {p["name"]: p for p in load_payers()}
+            settings = load_settings()
+            total_saved = total_skipped = total_errors = 0
+
+            for name in selected:
+                payer = payers.get(name)
+                if not payer:
+                    continue
+                res = run_extraction_for_payer(
+                    payer,
+                    self._app,
+                    settings,
+                    unread_only=self._unread_only.get(),
+                    progress_cb=self._append_log,
+                )
+                total_saved   += res.saved
+                total_skipped += res.skipped
+                total_errors  += res.errors
+
+            summary = (
+                f"Complete — Saved: {total_saved}, "
+                f"Skipped: {total_skipped}, Errors: {total_errors}"
+            )
+            self._append_log(summary)
+
+            def _done():
+                self._progress.stop()
+                self._run_btn.configure(state="normal")
+                self._summary.configure(text=summary)
+            try:
+                self._win.after(0, _done)
+            except Exception:
+                pass
+        finally:
+            pythoncom.CoUninitialize()
 
     def run(self) -> None:
         self._win.grab_set()
@@ -322,7 +338,7 @@ class PayerEditDialog:
             self._folder_id = entry_id
 
     def _pick_local_folder(self) -> None:
-        path = _pick_folder("Select Save Folder", self._save_path.get())
+        path = _pick_folder("Select Save Folder", self._save_path.get(), parent=self._win)
         if path:
             self._save_path.set(path)
 
@@ -455,24 +471,37 @@ class ManagePayersDialog:
         self._test_text.configure(state="disabled")
 
         def _run():
-            from config import load_settings
-            from extractor import run_extraction_for_payer
+            # BUG FIX #10: tkinter widgets must only be touched from the
+            # thread that owns the event loop.  Using after(0, ...) safely
+            # schedules each update on the main tkinter thread.
+            import pythoncom
+            pythoncom.CoInitialize()
+            try:
+                from config import load_settings
+                from extractor import run_extraction_for_payer
 
-            def _log(msg: str):
-                self._test_text.configure(state="normal")
-                self._test_text.insert("end", msg + "\n")
-                self._test_text.see("end")
-                self._test_text.configure(state="disabled")
+                def _log(msg: str):
+                    def _do():
+                        self._test_text.configure(state="normal")
+                        self._test_text.insert("end", msg + "\n")
+                        self._test_text.see("end")
+                        self._test_text.configure(state="disabled")
+                    try:
+                        self._win.after(0, _do)
+                    except Exception:
+                        pass
 
-            settings = load_settings()
-            run_extraction_for_payer(
-                payer,
-                self._app,
-                settings,
-                dry_run=True,
-                progress_cb=_log,
-                limit=5,
-            )
+                settings = load_settings()
+                run_extraction_for_payer(
+                    payer,
+                    self._app,
+                    settings,
+                    dry_run=True,
+                    progress_cb=_log,
+                    limit=5,
+                )
+            finally:
+                pythoncom.CoUninitialize()
 
         threading.Thread(target=_run, daemon=True).start()
 
@@ -518,7 +547,8 @@ class SettingsDialog:
         ttk.Entry(save_fr, textvariable=self._save_root, width=30).grid(row=0, column=0, sticky="ew")
         ttk.Button(save_fr, text="Browse…",
                    command=lambda: self._save_root.set(
-                       _pick_folder("Default Save Root", self._save_root.get()) or self._save_root.get()
+                       _pick_folder("Default Save Root", self._save_root.get(),
+                                    parent=self._win) or self._save_root.get()
                    )).grid(row=0, column=1, padx=(4, 0))
 
         # Log file path

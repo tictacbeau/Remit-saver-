@@ -1,11 +1,10 @@
 # remitsaver_addin.py
 # RemitSaver Outlook COM Add-in
-# Implements IDTExtensibility2 + IRibbonExtensibility via pywin32/comtypes
+# Implements IDTExtensibility2 + IRibbonExtensibility via pywin32
 
 import sys
 import os
 import threading
-import traceback
 import logging
 
 # ── Ensure the add-in's own directory is on sys.path so sibling imports work ──
@@ -13,10 +12,8 @@ _ADDIN_DIR = os.path.dirname(os.path.abspath(__file__))
 if _ADDIN_DIR not in sys.path:
     sys.path.insert(0, _ADDIN_DIR)
 
-import win32com.client
 import win32com.server.register
 import pythoncom
-import pywintypes
 import winreg
 
 # ── COM GUIDs ─────────────────────────────────────────────────────────────────
@@ -26,6 +23,13 @@ ADDIN_CLASSID = "{6D8B3E2A-4F1C-4A7D-9B5E-2C8F1A3D6E9B}"
 
 # ── Registry key that Outlook reads ──────────────────────────────────────────
 OUTLOOK_ADDIN_KEY = r"Software\Microsoft\Office\Outlook\Addins\RemitSaver.Connect"
+
+# ── Interface IIDs ────────────────────────────────────────────────────────────
+# pywin32's BasicWrapPolicy uses _com_interfaces_ to answer QueryInterface calls.
+# Without these, Outlook's QI for IDTExtensibility2 returns E_NOINTERFACE and
+# the add-in is never loaded.
+IID_IDTExtensibility2   = "{B65AD801-ABAF-11D0-BB8B-0060081897C8}"
+IID_IRibbonExtensibility = "{000C0396-0000-0000-C000-000000000046}"
 
 # ── Ribbon XML ────────────────────────────────────────────────────────────────
 RIBBON_XML = r"""<?xml version="1.0" encoding="UTF-8"?>
@@ -89,31 +93,51 @@ def _run_async(fn, *args, **kwargs):
 class RemitSaverAddin:
     """
     Implements:
-      IDTExtensibility2  – Outlook loads/unloads this class as an add-in
+      IDTExtensibility2   – Outlook loads/unloads this class as an add-in
       IRibbonExtensibility – supplies the Ribbon XML to Office
     """
 
     # ── COM registration metadata ──────────────────────────────────────────
-    _reg_clsid_     = ADDIN_CLASSID
-    _reg_progid_    = ADDIN_PROGID
-    _reg_desc_      = "RemitSaver Outlook Add-in"
-    _reg_clsctx_    = pythoncom.CLSCTX_INPROC_SERVER
-    _reg_policy_    = None          # use default BasicWrapPolicy
-    _public_methods_ = []
-    _readonly_attrs_ = []
+    _reg_clsid_  = ADDIN_CLASSID
+    _reg_progid_ = ADDIN_PROGID
+    _reg_desc_   = "RemitSaver Outlook Add-in"
+    _reg_clsctx_ = pythoncom.CLSCTX_INPROC_SERVER
 
-    # IDTExtensibility2 interface GUID
-    _com_interfaces_ = []           # pywin32 fills from IIDs below
-    _typelib_guid_   = None
+    # BUG FIX #2: list the interfaces this server supports so that Outlook's
+    # QueryInterface calls for IDTExtensibility2 and IRibbonExtensibility
+    # succeed instead of returning E_NOINTERFACE.
+    _com_interfaces_ = [
+        IID_IDTExtensibility2,
+        IID_IRibbonExtensibility,
+    ]
 
-    # ── IDTExtensibility2 interface IIDs that Outlook will QI for ─────────
-    # We implement them as plain methods; pywin32's BasicWrapPolicy exposes them.
-    _iid_IDTExtensibility2_ = "{B65AD801-ABAF-11D0-BB8B-0060081897C8}"
+    # BUG FIX #1: every method Outlook (or the Ribbon host) calls through
+    # IDispatch must be listed here.  An empty list means no methods are
+    # visible to COM callers, so the add-in loads but nothing ever happens.
+    _public_methods_ = [
+        # IDTExtensibility2
+        "OnConnection",
+        "OnDisconnection",
+        "OnAddInsUpdate",
+        "OnStartupComplete",
+        "OnBeginShutdown",
+        # IRibbonExtensibility
+        "GetCustomUI",
+        # Ribbon onLoad / onAction callbacks
+        "ribbon_on_load",
+        "on_extract_now",
+        "on_manage_payers",
+        "on_settings",
+    ]
 
-    # ── State ──────────────────────────────────────────────────────────────
-    _application    = None   # Outlook.Application
-    _ribbon_ui      = None   # IRibbonUI callback handle
-    _auto_run_done  = False
+    # BUG FIX #3: state must be instance-level, not class-level.
+    # Class-level attributes are shared across all instances and are mutated
+    # in place, which causes the first instance's state to bleed into any
+    # subsequent instance created during the same process lifetime.
+    def __init__(self):
+        self._application   = None   # Outlook.Application COM object
+        self._ribbon_ui     = None   # IRibbonUI handle returned by onLoad
+        self._auto_run_done = False  # guard against duplicate startup runs
 
     # ══ IDTExtensibility2 ════════════════════════════════════════════════════
 
@@ -122,7 +146,6 @@ class RemitSaverAddin:
         try:
             logger.info("OnConnection called (mode=%s)", connect_mode)
             self._application = application
-            # Trigger Ribbon load; OnStartupComplete/OnBeginShutdown handle the rest
         except Exception:
             logger.exception("OnConnection failed")
 
@@ -153,69 +176,93 @@ class RemitSaverAddin:
     # ══ IRibbonExtensibility ═════════════════════════════════════════════════
 
     def GetCustomUI(self, ribbon_id):
-        """Return Ribbon XML for the Explorer window ribbon."""
+        """Return Ribbon XML; called by Office before the Explorer window opens."""
         logger.debug("GetCustomUI called for ribbon_id=%s", ribbon_id)
         return RIBBON_XML
 
     # ══ Ribbon callbacks (onLoad / onAction) ═════════════════════════════════
 
     def ribbon_on_load(self, ribbon_ui):
-        """Fired once Office has loaded the Ribbon; save the IRibbonUI handle."""
+        """Office fires this once after parsing the Ribbon XML."""
         self._ribbon_ui = ribbon_ui
         logger.info("Ribbon loaded")
 
     def on_extract_now(self, control):
-        """'Extract Now' button clicked."""
         logger.info("Extract Now clicked")
         _run_async(self._open_extract_dialog)
 
     def on_manage_payers(self, control):
-        """'Manage Payers' button clicked."""
         logger.info("Manage Payers clicked")
         _run_async(self._open_manage_payers_dialog)
 
     def on_settings(self, control):
-        """'Settings' button clicked."""
         logger.info("Settings clicked")
         _run_async(self._open_settings_dialog)
 
-    # ══ Dialog launchers (run on background threads) ══════════════════════════
+    # ══ Dialog launchers ═════════════════════════════════════════════════════
+    # BUG FIX #4: each background thread must call CoInitialize before any
+    # COM calls.  Outlook's Application object lives in an STA apartment;
+    # accessing it from a thread that has not initialised COM raises
+    # "CoInitialize has not been called" (pythoncom.com_error -2147221008).
+    #
+    # BUG FIX #5: the hidden tk.Tk() root window must be destroyed after the
+    # dialog closes, otherwise a ghost window accumulates every time a button
+    # is clicked and eventually exhausts GDI/USER handles.
 
     def _open_extract_dialog(self):
+        pythoncom.CoInitialize()
         try:
             import tkinter as tk
             from dialogs import ExtractNowDialog
             root = tk.Tk()
             root.withdraw()
-            dlg = ExtractNowDialog(root, self._application)
-            dlg.run()
+            try:
+                dlg = ExtractNowDialog(root, self._application)
+                dlg.run()
+            finally:
+                root.destroy()
         except Exception:
             logger.exception("ExtractNow dialog error")
+        finally:
+            pythoncom.CoUninitialize()
 
     def _open_manage_payers_dialog(self):
+        pythoncom.CoInitialize()
         try:
             import tkinter as tk
             from dialogs import ManagePayersDialog
             root = tk.Tk()
             root.withdraw()
-            dlg = ManagePayersDialog(root, self._application)
-            dlg.run()
+            try:
+                dlg = ManagePayersDialog(root, self._application)
+                dlg.run()
+            finally:
+                root.destroy()
         except Exception:
             logger.exception("ManagePayers dialog error")
+        finally:
+            pythoncom.CoUninitialize()
 
     def _open_settings_dialog(self):
+        pythoncom.CoInitialize()
         try:
             import tkinter as tk
             from dialogs import SettingsDialog
             root = tk.Tk()
             root.withdraw()
-            dlg = SettingsDialog(root)
-            dlg.run()
+            try:
+                dlg = SettingsDialog(root)
+                dlg.run()
+            finally:
+                root.destroy()
         except Exception:
             logger.exception("Settings dialog error")
+        finally:
+            pythoncom.CoUninitialize()
 
     def _do_auto_extract(self):
-        """Auto-extraction on startup (if enabled in settings)."""
+        """Auto-extraction on startup (runs on a background thread)."""
+        pythoncom.CoInitialize()
         try:
             from config import load_payers, load_settings
             from extractor import run_extraction_for_payer
@@ -225,6 +272,8 @@ class RemitSaverAddin:
                 run_extraction_for_payer(payer, self._application, settings)
         except Exception:
             logger.exception("Auto-extract error")
+        finally:
+            pythoncom.CoUninitialize()
 
 
 # ══ Registry helpers ══════════════════════════════════════════════════════════
@@ -238,10 +287,10 @@ def _write_outlook_addin_registry():
             0,
             winreg.KEY_WRITE,
         )
-        winreg.SetValueEx(key, "Description",   0, winreg.REG_SZ,    "RemitSaver – Remittance extraction add-in")
-        winreg.SetValueEx(key, "FriendlyName",  0, winreg.REG_SZ,    "RemitSaver")
-        winreg.SetValueEx(key, "LoadBehavior",  0, winreg.REG_DWORD, 3)  # 3 = load at startup
-        winreg.SetValueEx(key, "CommandLineSafe", 0, winreg.REG_DWORD, 0)
+        winreg.SetValueEx(key, "Description",    0, winreg.REG_SZ,    "RemitSaver – Remittance extraction add-in")
+        winreg.SetValueEx(key, "FriendlyName",   0, winreg.REG_SZ,    "RemitSaver")
+        winreg.SetValueEx(key, "LoadBehavior",   0, winreg.REG_DWORD, 3)
+        winreg.SetValueEx(key, "CommandLineSafe",0, winreg.REG_DWORD, 0)
         winreg.CloseKey(key)
         print("[RemitSaver] Outlook add-in registry key written.")
     except Exception as exc:
@@ -262,12 +311,10 @@ def _remove_outlook_addin_registry():
 # ══ COM Registration hooks ════════════════════════════════════════════════════
 
 def DllRegisterServer():
-    """Called by win32com.server.register when registering."""
     _write_outlook_addin_registry()
 
 
 def DllUnregisterServer():
-    """Called by win32com.server.register when unregistering."""
     _remove_outlook_addin_registry()
 
 
@@ -281,7 +328,6 @@ if __name__ == "__main__":
         _remove_outlook_addin_registry()
         print("RemitSaver unregistered.")
     else:
-        # Default: register
         _reg.RegisterClasses(RemitSaverAddin, quiet=True)
         _write_outlook_addin_registry()
         print("RemitSaver registered successfully.")

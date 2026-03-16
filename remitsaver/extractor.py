@@ -8,7 +8,7 @@ import logging
 import os
 import re
 import tempfile
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional
 
 logger = logging.getLogger("RemitSaver.extractor")
 
@@ -130,17 +130,24 @@ def _amounts_from_csv_txt(data: bytes) -> List[float]:
 
 def _amounts_from_attachment(attachment) -> List[float]:
     """Read an Outlook MailItem attachment and extract amounts."""
+    tmp_name = None
     try:
         ext = os.path.splitext(attachment.FileName)[1].lower().lstrip(".")
-        # Save to a temp file, read bytes
+        # BUG FIX #7: create the temp file first, then SaveAsFile inside the
+        # same try block so the finally always cleans it up regardless of
+        # where the exception originates.
         tmp = tempfile.NamedTemporaryFile(delete=False, suffix="." + ext)
         tmp.close()
-        attachment.SaveAsFile(tmp.name)
+        tmp_name = tmp.name
         try:
-            with open(tmp.name, "rb") as fh:
+            attachment.SaveAsFile(tmp_name)
+            with open(tmp_name, "rb") as fh:
                 data = fh.read()
         finally:
-            os.unlink(tmp.name)
+            try:
+                os.unlink(tmp_name)
+            except OSError:
+                pass
 
         if ext == "pdf":
             return _amounts_from_pdf(data)
@@ -245,15 +252,29 @@ def _resolve_folder(application, payer: Dict[str, Any]):
     except Exception:
         pass
 
-    # Fall back to path walk: "Inbox\Subfolder\…"
+    # BUG FIX #8: path-walk fallback.
+    # Previously the code always anchored at GetDefaultFolder(6) (Inbox)
+    # regardless of the path, so any non-Inbox path silently returned a
+    # wrong folder.  Now: if the path starts with "Inbox" we anchor at Inbox
+    # and strip the first segment; otherwise we walk from the store root.
     try:
         path = payer.get("watch_folder_path", "Inbox")
         ns = application.GetNamespace("MAPI")
-        parts = path.replace("/", "\\").split("\\")
-        folder = ns.GetDefaultFolder(6)  # 6 = olFolderInbox
-        # If first part matches "Inbox" skip it, otherwise start from root
-        if parts and parts[0].lower() in ("inbox",):
+        parts = [p for p in path.replace("/", "\\").split("\\") if p]
+
+        if parts and parts[0].lower() == "inbox":
+            folder = ns.GetDefaultFolder(6)  # olFolderInbox
             parts = parts[1:]
+        else:
+            # Walk from the first (default) mail store root
+            folder = ns.GetDefaultFolder(6).Parent  # store root
+            # If the first segment matches the store name, skip it
+            try:
+                if parts and folder.Name.lower() == parts[0].lower():
+                    parts = parts[1:]
+            except Exception:
+                pass
+
         for part in parts:
             folder = folder.Folders[part]
         return folder
@@ -439,7 +460,11 @@ def _write_log_entry(
     if not log_path:
         return
     try:
-        os.makedirs(os.path.dirname(log_path), exist_ok=True)
+        # BUG FIX #9: os.path.dirname("remitsaver.log") returns "" which
+        # makes os.makedirs("") raise FileNotFoundError on Windows.
+        log_dir = os.path.dirname(log_path)
+        if log_dir:
+            os.makedirs(log_dir, exist_ok=True)
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         line = (
             f"{ts} | INFO | {payer} | {os.path.basename(filename)} "
