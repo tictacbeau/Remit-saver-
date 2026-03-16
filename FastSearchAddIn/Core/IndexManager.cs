@@ -72,7 +72,7 @@ namespace FastSearchAddIn.Core
                     using (var reader = DirectoryReader.Open(_directory))
                         return reader.NumDocs > 0;
                 }
-                catch { return false; }
+                catch (Exception ex) { Log.Debug(ex, "Index not yet available."); return false; }
             }
         }
 
@@ -82,10 +82,12 @@ namespace FastSearchAddIn.Core
         /// </summary>
         public void StartIndexingAsync(Outlook.Application outlookApp)
         {
-            // Cancel any running indexing task.
-            _indexCts?.Cancel();
+            // Cancel the previous run and dispose its token source to avoid a leak.
+            var old = _indexCts;
+            old?.Cancel();
             _indexCts = new CancellationTokenSource();
             var token = _indexCts.Token;
+            old?.Dispose();
 
             _indexTask = Task.Run(() => RunIndexing(outlookApp, token), token);
         }
@@ -180,10 +182,20 @@ namespace FastSearchAddIn.Core
         {
             if (token.IsCancellationRequested) return;
 
-            // Skip non-mail folders (calendar, contacts, etc.).
-            if (folder.DefaultItemType != Outlook.OlItemType.olMailItem)
-                goto ProcessSubfolders;
+            // Index mail items in this folder (skip calendar, contacts, tasks, etc.).
+            if (folder.DefaultItemType == Outlook.OlItemType.olMailItem)
+                IndexMailItems(folder, storeId, ref totalIndexed, token);
 
+            // Always recurse into subfolders regardless of this folder's item type.
+            IndexSubfolders(folder, storeId, ref totalIndexed, token);
+        }
+
+        private void IndexMailItems(
+            Outlook.MAPIFolder folder,
+            string storeId,
+            ref int totalIndexed,
+            CancellationToken token)
+        {
             Outlook.Items items = null;
             try
             {
@@ -203,7 +215,7 @@ namespace FastSearchAddIn.Core
                             IndexMailItem(mail, storeId);
                             totalIndexed++;
 
-                            // Commit in batches to manage memory.
+                            // Commit in batches to bound memory usage.
                             if (totalIndexed % 500 == 0)
                             {
                                 lock (_writerLock) { _writer.Commit(); }
@@ -230,9 +242,14 @@ namespace FastSearchAddIn.Core
             {
                 ReleaseComObject(items);
             }
+        }
 
-            ProcessSubfolders:
-            // Recurse into subfolders.
+        private void IndexSubfolders(
+            Outlook.MAPIFolder folder,
+            string storeId,
+            ref int totalIndexed,
+            CancellationToken token)
+        {
             Outlook.Folders subfolders = null;
             try
             {
@@ -309,7 +326,8 @@ namespace FastSearchAddIn.Core
         {
             if (obj != null && Marshal.IsComObject(obj))
             {
-                try { Marshal.ReleaseComObject(obj); } catch { }
+                try { Marshal.ReleaseComObject(obj); }
+                catch (Exception ex) { Log.Warn(ex, "Failed to release COM object of type {0}.", obj.GetType().Name); }
             }
         }
 
@@ -318,15 +336,27 @@ namespace FastSearchAddIn.Core
         // -----------------------------------------------------------------------
         public void Dispose()
         {
+            // Signal cancellation and give the background task up to 5 seconds to finish cleanly.
             _indexCts?.Cancel();
-            try { _indexTask?.Wait(5000); } catch { }
+            try
+            {
+                if (_indexTask != null && !_indexTask.Wait(5000))
+                    Log.Warn("Background indexing task did not finish within 5 s during shutdown.");
+            }
+            catch (AggregateException ae) { Log.Warn(ae, "Background indexing task faulted during shutdown."); }
+
+            // Always dispose the CTS after use.
+            _indexCts?.Dispose();
 
             lock (_writerLock)
             {
-                try { _writer?.Dispose(); } catch { }
+                try { _writer?.Dispose(); }
+                catch (Exception ex) { Log.Warn(ex, "Error closing IndexWriter."); }
             }
-            try { _analyzer?.Dispose(); } catch { }
-            try { _directory?.Dispose(); } catch { }
+            try { _analyzer?.Dispose(); }
+            catch (Exception ex) { Log.Warn(ex, "Error disposing StandardAnalyzer."); }
+            try { _directory?.Dispose(); }
+            catch (Exception ex) { Log.Warn(ex, "Error disposing FSDirectory."); }
         }
     }
 

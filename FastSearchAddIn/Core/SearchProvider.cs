@@ -31,9 +31,8 @@ namespace FastSearchAddIn.Core
             IndexManager.FieldSenderEmail,
         };
 
-        // Debounce support.
+        // Debounce support – only one search is scheduled at a time.
         private CancellationTokenSource _debounceCts;
-        private readonly SemaphoreSlim _searchLock = new SemaphoreSlim(1, 1);
 
         public SearchProvider(IndexManager indexManager)
         {
@@ -54,10 +53,12 @@ namespace FastSearchAddIn.Core
             int debounceMs = 300,
             CancellationToken externalToken = default)
         {
-            // Cancel any previously scheduled search.
-            _debounceCts?.Cancel();
+            // Cancel the previous search and dispose its token source to avoid a leak.
+            var old = _debounceCts;
+            old?.Cancel();
             _debounceCts = CancellationTokenSource.CreateLinkedTokenSource(externalToken);
             var token = _debounceCts.Token;
+            old?.Dispose();
 
             try
             {
@@ -127,13 +128,14 @@ namespace FastSearchAddIn.Core
                     {
                         token.ThrowIfCancellationRequested();
                         var doc = searcher.Doc(scoreDoc.Doc);
+                        // Document.Get() returns null for missing/unstored fields – default to empty string.
                         results.Add(new SearchResult
                         {
-                            EntryId      = doc.Get(IndexManager.FieldEntryId),
-                            StoreId      = doc.Get(IndexManager.FieldStoreId),
-                            Subject      = doc.Get(IndexManager.FieldSubject),
-                            SenderName   = doc.Get(IndexManager.FieldSender),
-                            SenderEmail  = doc.Get(IndexManager.FieldSenderEmail),
+                            EntryId      = doc.Get(IndexManager.FieldEntryId)      ?? string.Empty,
+                            StoreId      = doc.Get(IndexManager.FieldStoreId)      ?? string.Empty,
+                            Subject      = doc.Get(IndexManager.FieldSubject)      ?? string.Empty,
+                            SenderName   = doc.Get(IndexManager.FieldSender)       ?? string.Empty,
+                            SenderEmail  = doc.Get(IndexManager.FieldSenderEmail)  ?? string.Empty,
                             ReceivedTime = ParseReceivedTime(doc.Get(IndexManager.FieldReceived)),
                             Score        = scoreDoc.Score,
                         });
@@ -187,7 +189,6 @@ namespace FastSearchAddIn.Core
         {
             _debounceCts?.Cancel();
             _debounceCts?.Dispose();
-            _searchLock?.Dispose();
         }
     }
 

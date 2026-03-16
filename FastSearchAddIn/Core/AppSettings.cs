@@ -1,6 +1,7 @@
 using System;
 using System.IO;
 using Newtonsoft.Json;
+using NLog;
 
 namespace FastSearchAddIn.Core
 {
@@ -10,6 +11,8 @@ namespace FastSearchAddIn.Core
     /// </summary>
     public static class AppSettings
     {
+        private static readonly Logger Log = LogManager.GetCurrentClassLogger();
+
         // -----------------------------------------------------------------------
         // Well-known directories
         // -----------------------------------------------------------------------
@@ -53,7 +56,7 @@ namespace FastSearchAddIn.Core
                     _current = JsonConvert.DeserializeObject<Settings>(json) ?? new Settings();
                     return;
                 }
-                catch { /* fall through to defaults */ }
+                catch (Exception ex) { Log.Warn(ex, "Failed to load settings from {0}; using defaults.", SettingsFile); }
             }
             _current = new Settings();
         }
@@ -65,7 +68,7 @@ namespace FastSearchAddIn.Core
                 string json = JsonConvert.SerializeObject(_current, Formatting.Indented);
                 File.WriteAllText(SettingsFile, json);
             }
-            catch { /* best-effort */ }
+            catch (Exception ex) { Log.Warn(ex, "Failed to save settings to {0}.", SettingsFile); }
         }
     }
 

@@ -100,6 +100,7 @@
     <Compile Include="UI\SearchTaskPane.xaml.cs">
       <DependentUpon>SearchTaskPane.xaml</DependentUpon>
     </Compile>
+    <Compile Include="Core\AppSettings.cs" />
     <Compile Include="Core\IndexManager.cs" />
     <Compile Include="Core\SearchProvider.cs" />
     <Compile Include="Core\ExportManager.cs" />

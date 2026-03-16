@@ -62,7 +62,7 @@ namespace FastSearchAddIn
 
                 Log.Info("FastSearchAddIn started successfully.");
             }
-            catch (System.Exception ex)
+            catch (Exception ex)
             {
                 Log.Error(ex, "Error during add-in startup.");
                 MessageBox.Show(
@@ -83,8 +83,9 @@ namespace FastSearchAddIn
                 Log.Info("FastSearchAddIn shutting down.");
                 IndexManager?.Dispose();
                 SearchProvider?.Dispose();
+                // ExportManager has no disposable resources – nothing to release here.
             }
-            catch (System.Exception ex)
+            catch (Exception ex)
             {
                 Log.Error(ex, "Error during add-in shutdown.");
             }

@@ -145,10 +145,12 @@ namespace FastSearchAddIn.UI
 
         private void TriggerDebouncedSearch(string query)
         {
-            // Cancel any in-flight search.
-            _searchCts?.Cancel();
+            // Cancel any in-flight search and dispose its token source to avoid a leak.
+            var old = _searchCts;
+            old?.Cancel();
             _searchCts = new CancellationTokenSource();
             var token = _searchCts.Token;
+            old?.Dispose();
 
             if (string.IsNullOrWhiteSpace(query))
             {
@@ -225,14 +227,16 @@ namespace FastSearchAddIn.UI
                     PbarExport.Value = 100;
                     SetExportStatus(summary.Message, isError: false);
 
-                    // Offer to open the export folder.
+                    // Offer to open the export folder. Validate path before passing to shell.
                     if (summary.ExportRootPath != null &&
+                        System.IO.Directory.Exists(summary.ExportRootPath) &&
                         MessageBox.Show($"{summary.Message}\n\nOpen export folder?",
                             "Export Complete",
                             MessageBoxButton.YesNo,
                             MessageBoxImage.Information) == MessageBoxResult.Yes)
                     {
-                        Process.Start("explorer.exe", summary.ExportRootPath);
+                        // Pass path as a quoted argument to prevent argument injection.
+                        Process.Start("explorer.exe", $"\"{summary.ExportRootPath}\"");
                     }
                 });
             }

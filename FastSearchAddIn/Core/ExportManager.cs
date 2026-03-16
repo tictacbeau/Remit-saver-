@@ -229,7 +229,8 @@ namespace FastSearchAddIn.Core
         {
             if (obj != null && Marshal.IsComObject(obj))
             {
-                try { Marshal.ReleaseComObject(obj); } catch { }
+                try { Marshal.ReleaseComObject(obj); }
+                catch (Exception ex) { Log.Warn(ex, "Failed to release COM object of type {0}.", obj.GetType().Name); }
             }
         }
     }
