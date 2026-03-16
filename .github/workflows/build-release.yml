@@ -4,57 +4,99 @@ on:
   push:
     branches:
       - "claude/outlook-vsto-search-export-lo7zQ"
-  workflow_dispatch:   # allow manual trigger from GitHub UI
+  workflow_dispatch:
 
 jobs:
   build:
-    runs-on: windows-latest   # VSTO + .NET Framework requires Windows
+    runs-on: windows-2022   # pinned – ships with VS 2022
 
     steps:
-      # ── 1. Checkout ────────────────────────────────────────────────────────
-      - name: Checkout repository
+      # ── 1. Checkout ─────────────────────────────────────────────────────────
+      - name: Checkout
         uses: actions/checkout@v4
 
-      # ── 2. Setup MSBuild ───────────────────────────────────────────────────
+      # ── 2. Install the VS "Office/SharePoint development" workload ──────────
+      #   The default windows-2022 image has VS 2022 but NOT the Office tools.
+      #   This step adds exactly what VSTO MSBuild targets need.
+      - name: Install VS Office Developer Tools workload
+        shell: pwsh
+        run: |
+          $vsInstaller = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vs_installer.exe"
+          & $vsInstaller modify `
+            --installPath "C:\Program Files\Microsoft Visual Studio\2022\Enterprise" `
+            --add Microsoft.VisualStudio.Workload.Office `
+            --quiet --norestart --force
+          Write-Host "Office workload install exit code: $LASTEXITCODE"
+          # Non-zero exit is acceptable if already installed
+          exit 0
+
+      # ── 3. Install VSTO Runtime (provides Microsoft.Office.Tools.* GAC DLLs) ─
+      - name: Install VSTO Runtime
+        shell: pwsh
+        run: |
+          $url = "https://download.microsoft.com/download/7/B/4/7B4F1CBF-5EF9-4DC7-B998-B52D1C8D9F8F/vstor_redist.exe"
+          $out = "$env:TEMP\vstor_redist.exe"
+          Invoke-WebRequest $url -OutFile $out -UseBasicParsing
+          Start-Process $out -ArgumentList "/quiet /norestart" -Wait
+          Write-Host "VSTO runtime installed."
+
+      # ── 4. Add MSBuild to PATH ───────────────────────────────────────────────
       - name: Setup MSBuild
         uses: microsoft/setup-msbuild@v2
 
-      # ── 3. Setup NuGet ─────────────────────────────────────────────────────
-      - name: Setup NuGet
-        uses: NuGet/setup-nuget@v2
-        with:
-          nuget-version: latest
+      # ── 5. Restore NuGet packages (PackageReference style → dotnet restore) ──
+      - name: Restore packages
+        shell: pwsh
+        run: |
+          dotnet restore FastSearchAddIn/FastSearchAddIn.csproj `
+            --verbosity minimal
 
-      # ── 4. Restore NuGet packages ──────────────────────────────────────────
-      - name: Restore NuGet packages
-        run: nuget restore FastSearchAddIn/FastSearchAddIn.csproj
-
-      # ── 5. Build Release ───────────────────────────────────────────────────
-      - name: Build (Release)
+      # ── 6. Build ─────────────────────────────────────────────────────────────
+      - name: Build Release
+        shell: pwsh
         run: |
           msbuild FastSearchAddIn/FastSearchAddIn.csproj `
             /p:Configuration=Release `
             /p:Platform="Any CPU" `
             /p:SignManifests=false `
-            /v:minimal
+            /p:GenerateClickOnceManifests=false `
+            /restore:false `
+            /v:normal `
+            /bl:build.binlog
 
-      # ── 6. Collect output files ────────────────────────────────────────────
-      - name: Collect build output
-        run: |
-          New-Item -ItemType Directory -Force -Path publish
-          Copy-Item -Path "FastSearchAddIn/bin/Release/*" -Destination publish/ -Recurse
+      # ── 7. Upload binlog on failure (helps diagnose future errors) ───────────
+      - name: Upload binlog (on failure)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-binlog
+          path: build.binlog
+          retention-days: 7
+
+      # ── 8. Package output ────────────────────────────────────────────────────
+      - name: Package output
+        if: success()
         shell: pwsh
+        run: |
+          $out = "FastSearchAddIn-Release"
+          New-Item -ItemType Directory -Force -Path $out | Out-Null
+          Copy-Item "FastSearchAddIn\bin\Release\*" $out -Recurse -Force
+          Compress-Archive -Path "$out\*" -DestinationPath "$out.zip" -Force
+          Write-Host "Packaged contents:"
+          Get-ChildItem $out | Select-Object Name, Length
 
-      # ── 7. Upload artifact ─────────────────────────────────────────────────
-      - name: Upload build artifact
+      # ── 9. Upload artifact ───────────────────────────────────────────────────
+      - name: Upload artifact
+        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: FastSearchAddIn-Release
-          path: publish/
+          path: FastSearchAddIn-Release/
           retention-days: 30
 
-      # ── 8. Create GitHub Release (only on push to the feature branch) ──────
-      - name: Create GitHub Release
+      # ── 10. Create GitHub Release ────────────────────────────────────────────
+      - name: Create Release
+        if: success()
         uses: softprops/action-gh-release@v2
         with:
           tag_name: "build-${{ github.run_number }}"
@@ -62,21 +104,21 @@ jobs:
           body: |
             ## FastSearchAddIn – Outlook VSTO Add-in
 
-            ### Installation
-            1. Download and extract `FastSearchAddIn-Release.zip`
-            2. Double-click `FastSearchAddIn.vsto` to install
-            3. When prompted, click **Install** and trust the certificate
-            4. Open Outlook – the **Fast Search** task pane will appear on the right
+            ### Install
+            1. Download `FastSearchAddIn-Release.zip` below and extract it
+            2. Double-click **`FastSearchAddIn.vsto`**
+            3. Click **Install** when prompted
+            4. Open Outlook – the **Fast Search** sidebar appears on the right
 
             ### Requirements
-            - Windows 10/11
+            - Windows 10 / 11
             - Outlook 2016, 2019, or Microsoft 365 (desktop)
-            - [.NET Framework 4.7.2 Runtime](https://dotnet.microsoft.com/download/dotnet-framework/net472) (already included on most Windows 10/11 machines)
-            - [Visual Studio 2010 Tools for Office Runtime](https://aka.ms/vstoruntime) (download if Outlook shows an error)
+            - .NET Framework 4.7.2 (built into Windows 10/11)
+            - [VSTO Runtime](https://aka.ms/vstoruntime) – only needed if Outlook shows an error on first launch
 
             ### Uninstall
-            Control Panel → Programs → FastSearchAddIn → Uninstall
-          files: publish/**
+            Control Panel → Programs → **FastSearchAddIn** → Uninstall
+          files: FastSearchAddIn-Release.zip
           draft: false
           prerelease: false
         env:
