@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  VSTO Add-in manifest for FastSearchAddIn.
+  This file is required by the VSTO runtime for add-in registration.
+-->
+<vstav3:addIn
+  xmlns:vstav3="urn:schemas-microsoft-com:vsta.v3">
+  <vstav3:entryPointsCollection>
+    <vstav3:entryPoints>
+      <vstav3:entryPoint
+        class="FastSearchAddIn.ThisAddIn">
+        <assemblyIdentity
+          name="FastSearchAddIn"
+          version="1.0.0.0"
+          language="neutral"
+          processorArchitecture="msil" />
+      </vstav3:entryPoint>
+    </vstav3:entryPoints>
+  </vstav3:entryPointsCollection>
+  <vstav3:update
+    enabled="false">
+    <vstav3:expiration
+      maximumAge="7"
+      unit="days" />
+  </vstav3:update>
+  <vstav3:application>
+    <vstov4:customizations xmlns:vstov4="urn:schemas-microsoft-com:vsto.v4">
+      <vstov4:customization>
+        <vstov4:appAddin
+          application="Outlook"
+          loadBehavior="3"
+          keyName="FastSearchAddIn">
+          <vstov4:friendlyName>Fast Search Add-In</vstov4:friendlyName>
+          <vstov4:description>High-speed Lucene-powered email search with Desktop export.</vstov4:description>
+        </vstov4:appAddin>
+      </vstov4:customization>
+    </vstov4:customizations>
+  </vstav3:application>
+</vstav3:addIn>
